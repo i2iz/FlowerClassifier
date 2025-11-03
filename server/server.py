@@ -1,6 +1,10 @@
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import datetime
+import tensorflow as tf
+import numpy as np
+import pandas as pd
+
 
 class FlowerServerUI:
     def __init__(self, root):
@@ -16,6 +20,13 @@ class FlowerServerUI:
         style.configure("Treeview.Heading", font=("NanumGothic", 10, 'bold'))
 
         self.create_widgets()
+
+        # 모델 로드
+        self.model = None
+        self.df = None
+        self.infer = None
+
+        self.load_model_and_labels()
 
     def create_widgets(self):
         # 메인 프레임
@@ -97,6 +108,22 @@ class FlowerServerUI:
         self.log_text.tag_config("SUCCESS", foreground="green")
         self.log_text.tag_config("ERROR", foreground="red")
         self.log_text.tag_config("WARNING", foreground="orange")
+
+    def load_model_and_labels(self):
+        """모델 및 라벨 파일 로드"""
+        try:
+            self.model = tf.saved_model.load('./model')
+            self.df = pd.read_excel('./label.xlsx')
+            
+            # 추론을 위한 함수 시그니처
+            self.infer = self.model.signatures['serving_default']
+            self.add_log("모델/라벨 로드 완료", "SUCCESS")
+        except Exception as e:
+            msg = f"모델 또는 라벨 파일 로드 실패: {str(e)}"
+            self.add_log(msg, "ERROR")
+            self.model = None
+            self.df = None
+            self.infer = None
 
     def start_server(self):
         """서버 시작"""
