@@ -1,6 +1,13 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk
+import socket
+import threading
+from io import BytesIO
+
+SERVER_IP = 'server'
+SERVER_PORT = 8080
+CHUNK_SIZE = 1024
 
 class FlowerClientUI:
     def __init__(self, root):
@@ -14,6 +21,9 @@ class FlowerClientUI:
 
         # 파일 경로 저장을 위한 변수
         self.file_path = tk.StringVar(value="")
+
+        # 통신 상태 변수
+        self.is_sending = False
 
         self.create_widgets()
 
@@ -88,8 +98,69 @@ class FlowerClientUI:
         self.file_button.config(state=tk.DISABLED)
         self.send_button.config(state=tk.DISABLED)
 
+        # 네트워크 통신을 위한 스레드 시작
+        threading.Thread(target=self._network_send_thread, daemon=True).start()
+
+    def _network_send_thread(self):
+        """실제 서버와의 통신을 처리하는 스레드 함수"""
+        try:
+            file_path = self.file_path.get()
+
+            with open(file_path, 'rb') as file:
+                data = file.read()
+                total_size = len(data)
+
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    try :
+                        sock.connect((SERVER_IP, SERVER_PORT))
+                    except socket.gaierror:
+                        # Docker환경이 아닌경우에는 localhost로 시도
+                        self.update_ui_after_send(
+                            "Docker환경이 아니므로 localhost로 재시도 합니다.", "orange")
+                        sock.connect(('127.0.0.1', SERVER_PORT))
+                    except ConnectionRefusedError:
+                        self.update_ui_after_send(
+                            f"서버({SERVER_IP}:{SERVER_PORT}) 연결 실패. 서버가 실행 중인지 확인하세요.", "red")
+                        return
+                    
+                    # 데이터 크기 전송(8byte)
+                    sock.sendall(total_size.to_bytes(8, "big"))
+
+                    # 이미지 데이터 전송
+                    for i in range(0, total_size, CHUNK_SIZE):
+                        sock.sendall(data[i:i+CHUNK_SIZE])
+
+                    # 서버 응답 수신
+                    sock.settimeout(10)
+                    response = sock.recv(1024)
+
+                    if response:
+                        result_msg = response.decode('utf-8')
+                        self.update_ui_after_send(f"분석 결과: {result_msg}", "green")
+                    else:
+                        self.update_ui_after_send('서버로부터 응답이 없습니다.', "red")
+
+        except Exception as e:
+            self.update_ui_after_send(f'데이터 전송/수신 오류 발생: {e}', "red")
+        finally:
+            self.is_sending = False
+
+    def update_ui_after_send(self, message, color):
+        """스레드에서 GUI 요소를 안전하게 업데이트하는 함수"""
+        self.root.after(0, self._actual_ui_update, message, color)
+
+    def _actual_ui_update(self, message, color):
+        """실제 GUI 업데이트 함수"""
+        self.result_label.config(text=message, foreground=color)
+        self.file_button.config(state=tk.NORMAL)
+        self.send_button.config(state=tk.NORMAL)
+
     def close_app(self):
         """프로그램을 안전하게 종료하는 함수"""
+        if self.is_sending:
+            messagebox.showinfo('통신중', '데이터 전송이 진행 중이므로, 잠시 후 다시 시도해 주세요.')
+            return
+        
         if messagebox.askokcancel("종료 확인", "프로그램을 종료하시겠습니까?"):
             self.root.quit()
             self.root.destroy()
