@@ -27,7 +27,8 @@ class FlowerServerUI:
 
         # 스타일 설정
         style = ttk.Style()
-        style.theme_use('aqua')
+        style.theme_use('aqua') 
+        # style.theme_use('clam') # docker 환경에서는 이거 써야 됨
         style.configure("Treeview.Heading", font=("NanumGothic", 10, 'bold'))
 
         self.create_widgets()
@@ -131,6 +132,10 @@ class FlowerServerUI:
         try:
             self.model = tf.saved_model.load('./model')
             self.df = pd.read_excel('./label.xlsx')
+
+            # Docker 환경이라면 ./server/디렉토리 기준으로 지정해야 실행된다
+            # self.model = tf.saved_model.load('./server/model') 
+            # self.df = pd.read_excel('./server/label.xlsx')
             
             # 추론을 위한 함수 시그니처
             self.infer = self.model.signatures['serving_default']

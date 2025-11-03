@@ -18,6 +18,7 @@ class FlowerClientUI:
         # 스타일 설정
         style = ttk.Style()
         style.theme_use('aqua')
+        # style.theme_use('clam') # docker 환경에서는 이거 써야 됨
 
         # 파일 경로 저장을 위한 변수
         self.file_path = tk.StringVar(value="")
