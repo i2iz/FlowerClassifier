@@ -4,7 +4,18 @@ import datetime
 import tensorflow as tf
 import numpy as np
 import pandas as pd
+import socket
+import threading
+from io import BytesIO
+from PIL import Image, ImageFile
 
+# 불완전한 이미지 데이터 처리 허용
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+# 서버 설정
+SERVER_IP = '0.0.0.0'
+SERVER_PORT = 8080
+SERVER_ADDR = (SERVER_IP, SERVER_PORT)
 
 class FlowerServerUI:
     def __init__(self, root):
@@ -28,6 +39,12 @@ class FlowerServerUI:
 
         self.load_model_and_labels()
 
+        # 서버 및 스레드 관련 변수 초기화
+        self.server_socket = None
+        self.client_threads = []
+        self.client_sockets = []
+        self.running = False # 서버 실행 상태
+
     def create_widgets(self):
         # 메인 프레임
         main_frame = ttk.Frame(self.root, padding="10")
@@ -45,11 +62,11 @@ class FlowerServerUI:
         status_frame.grid(row=0, column=0, sticky="ewns")
         
         ttk.Label(status_frame, text="IP 주소:").grid(row=0, column=0, sticky="w")
-        self.ip_label = ttk.Label(status_frame, text="0.0.0.0", font=("NanumGothic", 10))
+        self.ip_label = ttk.Label(status_frame, text=str(SERVER_IP), font=("NanumGothic", 10))
         self.ip_label.grid(row=0, column=1, sticky="w")
 
         ttk.Label(status_frame, text="포트:").grid(row=1, column=0, sticky="w")
-        self.port_label = ttk.Label(status_frame, text="8080", font=("NanumGothic", 10))
+        self.port_label = ttk.Label(status_frame, text=str(SERVER_PORT), font=("NanumGothic", 10))
         self.port_label.grid(row=1, column=1, sticky="w")
 
         ttk.Label(status_frame, text="상태:").grid(row=2, column=0, sticky="w")
@@ -127,23 +144,186 @@ class FlowerServerUI:
 
     def start_server(self):
         """서버 시작"""
-        self.status_label.config(text="Running", foreground="green")
-        self.start_button.config(state=tk.DISABLED)
-        self.stop_button.config(state=tk.NORMAL)
+        if self.running:
+            self.add_log("서버가 이미 실행 중입니다.", "WARNING")
+            return
+            
+        if self.model is None or self.df is None:
+            self.add_log("모델 또는 라벨 파일이 로드되지 않아 서버를 시작할 수 없습니다.", "ERROR")
+            return
+        
+        try:
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server_socket.bind(SERVER_ADDR)
+            self.server_socket.listen(socket.SOMAXCONN)
+            self.server_socket.settimeout(1)
 
-        # 테스트 로그
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self.add_log("서버가 0.0.0.0:8080에서 시작되었습니다.", "INFO")
-        self.add_client_to_tree("192.168.0.10", "54321", now)
+            self.running = True
+
+            self.status_label.config(text="Running", foreground="green")
+            self.ip_label.config(text=SERVER_IP)
+            self.port_label.config(text=str(SERVER_PORT))
+            self.start_button.config(state=tk.DISABLED)
+            self.stop_button.config(state=tk.NORMAL)
+
+            # 연결 대기
+            threading.Thread(target=self.listen_for_clients, daemon=True).start()
+            self.add_log(f"서버가 {SERVER_IP}:{SERVER_PORT}에서 시작되었습니다.", "INFO")
+
+        except Exception as e:
+            self.running = False
+            self.status_label.config(text="Stopped", foreground="red")
+            self.add_log(f'서버 실행 실패: {str(e)}', 'ERROR')
+            self.start_button.config(state=tk.NORMAL)
+            self.stop_button.config(state=tk.DISABLED)
 
     def stop_server(self):
         """서버 중지"""
+        if not self.running:
+            self.add_log("이미 중지된 상태입니다.", "WARNING")
+            return
+        
+        self.running = False
+        self.add_log("서버 종료중...")
+
+        # 모든 클라이언트 소켓 닫기
+        for client_socket in self.client_sockets:
+            try:
+                client_socket.close()
+            except Exception:
+                pass
+        
+        # 모든 클라이언트 스레드 종료 대기
+        for thread in self.client_threads:
+            if thread.is_alive():
+                thread.join(timeout=1)
+        
+        if self.server_socket:
+            try:
+                self.server_socket.close()
+            except Exception:
+                pass
+
         self.status_label.config(text="Stopped", foreground="red")
         self.start_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
 
         self.add_log("서버가 중지되었습니다.")
         self.clear_client_tree()
+
+    def listen_for_clients(self) -> None:
+        """클라이언트 연결 대기 및 처리 스레드 시작"""
+        while self.running:
+            try:
+                client_socket, client_addr = self.server_socket.accept()
+
+                # 클라이언트 소켓 및 스레드 관리
+                self.client_sockets.append(client_socket)
+                self.add_log(f"클라이언트 연결: {client_addr}")
+
+                # 클라이언트 목록 업데이트
+                now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self.add_client_to_tree(client_addr[0], client_addr[1], now)
+
+                # 클라이언트 처리 스레드 시작
+                client_thread = threading.Thread(
+                    target=self.handle_client,
+                    args=(client_socket, client_addr)
+                )
+                self.client_threads.append(client_thread)
+                client_thread.start()
+            
+            except socket.timeout:
+                continue
+            except Exception as e:
+                if self.running:
+                    self.add_log(f"클라이언트 연결 대기중 오류: {str(e)}", "ERROR")
+
+    def handle_client(self, client_socket: socket.socket, client_addr: tuple) -> None:
+        """단일 클라이언트로부터 데이터를 수신하고 분류하여 결과를 전송"""
+        client_ip, client_port = client_addr
+
+        try:
+            self.add_log(f"클라이언트 처리 시작: {client_addr}")
+
+            # 8byte로 데이터 크기 수신
+            data_size_bytes = client_socket.recv(8)
+            if not data_size_bytes:
+                self.add_log(f"데이터 크기 수신 실패: {client_addr}", "ERROR")
+                return
+            
+            expected_size = int.from_bytes(data_size_bytes, 'big')
+            self.add_log(f"{client_addr} - 예상 데이터 크기: {expected_size} bytes")
+
+            # 청크 사이즈 1024 고정, 실제 데이터 수신
+            received_data = b''
+            chunk_size = 1024
+            while len(received_data) < expected_size:
+                chunk = client_socket.recv(chunk_size)
+                if not chunk:
+                    break
+                received_data += chunk
+            self.add_log(f"{client_addr} - 수신된 데이터 크기: {len(received_data)} bytes")
+
+            result = "서버 오류가 발생했습니다."
+            if len(received_data) != expected_size:
+                self.add_log(f"{client_addr} - 수신 데이터 크기가 예상과 다릅니다.", "ERROR")
+                result = "데이터 수신 중 오류가 발생했습니다."
+            else:
+                try:
+                    image = Image.open(BytesIO(received_data))
+                    self.add_log(f"{client_addr} - 이미지 로드 성공, 분류 중...")
+
+                    prediction = self.classify_image(image)
+                    predicted_class_idx = np.argmax(prediction[0])
+
+                    en_label, ko_label = self.get_flower_names_by_index(predicted_class_idx)
+                    result = f"이 꽃은 {ko_label}({en_label})인 것 같아요!"
+                    self.add_log(f"{client_addr} - 분류 결과: {result}", "SUCCESS")
+                
+                except Exception as e:
+                    self.add_log(f"{client_addr}- 이미지 처리/분류 실패: {str(e)}", "ERROR")
+                    result = f"이미지 분류에 실패했습니다: {str(e)}"
+            client_socket.sendall(result.encode('utf-8'))
+
+        except Exception as e:
+            self.add_log(f"{client_addr} - 처리 중 오류 발생: {str(e)}", "ERROR")
+        finally:
+            try:
+                client_socket.close()
+            except Exception:
+                pass
+
+            self.remove_client_from_tree(client_ip, client_port)
+            if client_socket in self.client_sockets:
+                self.client_sockets.remove(client_socket)
+            current_thread = threading.current_thread()
+            if current_thread in self.client_threads:
+                self.client_threads.remove(current_thread)
+            
+            self.add_log(f"클라이언트 연결 종료됨: {client_addr}")
+
+    def preprocess_image(self, image: Image.Image) -> np.ndarray:
+        """이미지 전처리"""
+        if image.mode == 'RGBA':
+            image = image.convert('RGB')
+        image = image.resize((299, 299))
+        arr = np.array(image) / 255.0
+        arr = np.expand_dims(arr, axis=0)
+        return arr
+
+    def classify_image(self, image: Image.Image) -> np.ndarray:
+        """이미지 분류"""
+        preprocessed_image = self.preprocess_image(image)
+        input_tensor = tf.convert_to_tensor(preprocessed_image, dtype=tf.float32)
+        prediction = self.infer(input_tensor)
+        output_key = list(self.infer.structured_outputs.keys())[0]
+        return prediction[output_key].numpy()
+    
+    def get_flower_names_by_index(self, index: int):
+        """예측된 index에 따른 꽃 이름 반환"""
+        return (self.df.iloc[index]['en_class'], self.df.iloc[index]['ko_class'])
 
     def add_log(self, message, msg_type="INFO"):
         """로그 표시"""
@@ -163,6 +343,14 @@ class FlowerServerUI:
         """클라이언트 정보를 Treeview에 추가"""
         self.client_tree.insert("", tk.END, values=(ip, port, time))
 
+    def remove_client_from_tree(self, ip, port):
+        """ip, port를 기준으로 클라이언트 정보를 Treeview에서 제거"""
+        for item in self.client_tree.get_children():
+            values = self.client_tree.item(item, "values")
+            if len(values) >= 2 and values[0] == ip and str(values[1]) == str(port):
+                self.client_tree.delete(item)
+                break
+
     def clear_client_tree(self):
         """TreeView의 모든 항목 삭제"""
         for item in self.client_tree.get_children():
@@ -170,6 +358,11 @@ class FlowerServerUI:
 
     def close_app(self):
         """프로그램 종료"""
+
+        # 서버가 실행중이면 우선 종료
+        if self.running:
+            self.stop_server()
+
         if messagebox.askokcancel("종료 확인", "프로그램을 종료하시겠습니까?"):
             self.root.quit()
             self.root.destroy()
