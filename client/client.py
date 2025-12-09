@@ -74,7 +74,23 @@ class FlowerClientUI:
             self.file_path.set(path)
             
             image = Image.open(path)
-            image.thumbnail((self.canvas.winfo_width(), self.canvas.winfo_height()))
+            
+            # 캔버스 크기 가져오기
+            canvas_width = self.canvas.winfo_width()
+            canvas_height = self.canvas.winfo_height()
+            
+            # 이미지 비율 계산
+            img_width, img_height = image.size
+            width_ratio = canvas_width / img_width
+            height_ratio = canvas_height / img_height
+            
+            # 비율을 유지하면서 캔버스에 맞추기 (fit)
+            scale_ratio = min(width_ratio, height_ratio)
+            new_width = int(img_width * scale_ratio)
+            new_height = int(img_height * scale_ratio)
+            
+            # 이미지 리사이즈 (확대 또는 축소)
+            image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
             self.image_tk = ImageTk.PhotoImage(image)
 
             self.canvas.delete("all")
